@@ -478,25 +478,35 @@ document.addEventListener('DOMContentLoaded',function(){
 </div>
 
 <script>
-// ─── DATA ───
-const db={library:[],lab:[],faculty:[],rooms:[],appts:[]};
-const catalogue=["Data Structures","Machine Learning","Operating Systems","Engineering Math","AI & Neural Networks","Computer Networks","DBMS","Digital Electronics","Algorithms","Python Programming"];
-const labData={
-  btech:[{i:'⚙️',n:'Arduino Kit'},{i:'🔌',n:'Circuit Board'},{i:'🤖',n:'Robotics Kit'},{i:'💡',n:'Breadboard Set'},{i:'📡',n:'Signal Analyzer'},{i:'🖥️',n:'FPGA Board'}],
-  agriculture:[{i:'🌱',n:'Soil Tester'},{i:'🔍',n:'Seed Analyzer'},{i:'🔬',n:'Plant Microscope'},{i:'💧',n:'PH Meter'},{i:'🌿',n:'Chlorophyll Meter'}],
-  bpharma:[{i:'⚗️',n:'PH Meter'},{i:'🧪',n:'Centrifuge'},{i:'📊',n:'Chemical Analyzer'},{i:'🔬',n:'Microscope'},{i:'💊',n:'Tablet Press'}]
-};
-const doctors=[
-  {i:'🩺',n:'Dr. Kumar',s:'General Medicine',t:'9am–1pm'},
-  {i:'🦷',n:'Dr. Singh',s:'Dentist',t:'10am–12pm'},
-  {i:'❤️',n:'Dr. Rao',s:'Cardiologist',t:'2pm–5pm'},
-  {i:'🧠',n:'Dr. Patel',s:'Psychiatrist',t:'11am–3pm'}
-];
+// ─── API CONFIG ───
+// This is the only line you need to change if you redeploy the backend elsewhere.
+const API_BASE = 'https://cms-smart-portal.onrender.com';
+
+function getToken(){ return localStorage.getItem('cms_token') || ''; }
+function setToken(t){ localStorage.setItem('cms_token', t); }
+function clearToken(){ localStorage.removeItem('cms_token'); localStorage.removeItem('cms_user'); }
+function getUser(){ try{ return JSON.parse(localStorage.getItem('cms_user')||'null'); }catch(e){ return null; } }
+function setUser(u){ localStorage.setItem('cms_user', JSON.stringify(u)); }
+
+// Thin wrapper around fetch: adds the API base URL, JSON headers, and the
+// bearer token (when present). Throws with the server's error message on failure.
+async function apiFetch(path, options={}){
+  const headers = Object.assign({ 'Content-Type': 'application/json' }, options.headers || {});
+  const token = getToken();
+  if (token) headers['Authorization'] = 'Bearer ' + token;
+  const res = await fetch(API_BASE + path, Object.assign({}, options, { headers }));
+  let data = null;
+  try { data = await res.json(); } catch(e) { /* no JSON body */ }
+  if (!res.ok) {
+    const msg = (data && data.error) ? data.error : ('Request failed (' + res.status + ')');
+    throw new Error(msg);
+  }
+  return data;
+}
+
+// ─── DATA (dept dropdowns only — everything else now lives on the backend) ───
 const studentDepts=["B.Tech – CSE","B.Tech – ECE","B.Tech – Mechanical","Agriculture","B Pharma","MBA","B.Sc","MCA"];
 const teacherDepts=["Computer Science","Electronics","Mechanical Engineering","Agriculture","B Pharma","Mathematics","Physics","Management"];
-// seed some faculty
-[['Dr. Sharma','B.Tech CSE','2pm–4pm'],['Dr. Mehta','B Pharma','1pm–3pm'],['Dr. Gupta','Agriculture','10am–12pm']].forEach(r=>db.faculty.push(r));
-[['A-101','Block A','20–40'],['B-203','Block B','40–60'],['C-302','Block C','10–20']].forEach(r=>db.rooms.push(r));
 
 // ─── AUTH STATE ───
 let currentRole='student';
@@ -531,37 +541,60 @@ function switchAuth(tab,btn){
   document.getElementById('authSignin').style.display=tab==='signin'?'block':'none';
   document.getElementById('authRegister').style.display=tab==='register'?'block':'none';
 }
-function sendOTP(){
+async function sendOTP(){
   const id=document.getElementById('loginId').value.trim();
-  if(!id){showToast('⚠️ Enter your ID first','warn');return;}
-  otp=Math.floor(1000+Math.random()*9000).toString();
-  showToast('📱 Your OTP: '+otp,'info');
-  const btn=document.getElementById('otpBtn');btn.disabled=true;let t=30;
-  const iv=setInterval(()=>{t--;btn.textContent='Wait '+t+'s';if(t<=0){clearInterval(iv);btn.textContent='Resend';btn.disabled=false}},1000);
+  const phone=document.getElementById('loginPhone').value.trim();
+  if(!id||!phone){showToast('⚠️ Enter your ID and phone number first','warn');return;}
+  const btn=document.getElementById('otpBtn');
+  btn.disabled=true;
+  try{
+    const data=await apiFetch('/api/auth/otp/send',{method:'POST',body:JSON.stringify({loginId:id,phone})});
+    // devOtp is only returned because there's no SMS provider wired up yet —
+    // remove this line once you connect a real SMS gateway on the backend.
+    showToast('📱 Your OTP: '+data.devOtp,'info');
+    let t=30;
+    const iv=setInterval(()=>{t--;btn.textContent='Wait '+t+'s';if(t<=0){clearInterval(iv);btn.textContent='Resend';btn.disabled=false}},1000);
+  }catch(err){
+    showToast('❌ '+err.message,'warn');
+    btn.disabled=false;
+  }
 }
-function doLogin(e){
+async function doLogin(e){
   addRipple(e.currentTarget,e);
   const id=document.getElementById('loginId').value.trim();
   const inp=document.getElementById('otpInput').value.trim();
   if(!id){showToast('⚠️ Enter your ID','warn');return}
-  if(!otp){showToast('⚠️ Click Get OTP first','warn');return}
-  if(inp!==otp){showToast('❌ Incorrect OTP','warn');return}
-  const key='cms_'+currentRole+'_'+id;
-  const name=localStorage.getItem(key);
-  if(!name){showToast('⚠️ Not registered — please register first','warn');return}
-  launchPortal(name,id,currentRole);
+  if(!inp){showToast('⚠️ Click Get OTP first, then enter it','warn');return}
+  try{
+    const data=await apiFetch('/api/auth/otp/verify',{method:'POST',body:JSON.stringify({loginId:id,otp:inp})});
+    setToken(data.token);setUser(data.user);
+    if(data.user.role!==currentRole){
+      showToast('⚠️ This ID is registered as '+data.user.role+', not '+currentRole,'warn');
+    }
+    launchPortal(data.user.name,data.user.login_id,data.user.role);
+  }catch(err){
+    showToast('❌ '+err.message,'warn');
+  }
 }
-function doRegister(e){
+async function doRegister(e){
   addRipple(e.currentTarget,e);
   const name=document.getElementById('regName').value.trim();
   const id=document.getElementById('regId').value.trim();
+  const phone=document.getElementById('regPhone').value.trim();
   const dept=document.getElementById('regDept').value;
-  if(!name||!id||!dept){showToast('⚠️ Fill all required fields','warn');return}
-  const key='cms_'+currentRole+'_'+id;
-  localStorage.setItem(key,name);
-  showToast('✅ Account created! Now sign in.');
-  document.querySelector('.auth-tab:first-child').click();
-  document.getElementById('loginId').value=id;
+  const desig=document.getElementById('regDesig')?document.getElementById('regDesig').value:'';
+  if(!name||!id||!phone||!dept){showToast('⚠️ Fill all required fields','warn');return}
+  try{
+    await apiFetch('/api/auth/register',{method:'POST',body:JSON.stringify({
+      loginId:id,name,phone,role:currentRole,department:dept,designation:desig||null
+    })});
+    showToast('✅ Account created! Now sign in.');
+    document.querySelector('.auth-tab:first-child').click();
+    document.getElementById('loginId').value=id;
+    document.getElementById('loginPhone').value=phone;
+  }catch(err){
+    showToast('❌ '+err.message,'warn');
+  }
 }
 function launchPortal(name,id,role){
   document.getElementById('loginPage').style.display='none';
@@ -584,6 +617,7 @@ function launchPortal(name,id,role){
   loadStatic();renderAll();
 }
 function logout(){
+  clearToken();
   document.getElementById('portal').style.display='none';
   document.getElementById('loginPage').style.display='none';
   document.getElementById('rolePage').style.display='flex';
@@ -602,51 +636,150 @@ function navTo(id,sbEl){
   else document.querySelectorAll('.sb-item').forEach(item=>{
     if(item.getAttribute('onclick')&&item.getAttribute('onclick').includes("'"+id+"'"))item.classList.add('active');
   });
-  // Trigger section-specific renders
-  if(id==='hospital'&&typeof renderDocCards==='function') setTimeout(()=>renderDocCards('all'),50);
-  if(id==='library'&&typeof renderCatalogue==='function') setTimeout(()=>renderCatalogue(),50);
+  // Trigger section-specific renders so data is fresh every time a page is opened
+  if(id==='hospital'){
+    if(typeof renderDocCards==='function') setTimeout(()=>renderDocCards('all'),50);
+    if(typeof renderApptTable==='function') setTimeout(()=>renderApptTable(),50);
+  }
+  if(id==='library'){
+    if(typeof renderCatalogue==='function') setTimeout(()=>renderCatalogue(),50);
+    if(typeof renderLibTable==='function') setTimeout(()=>renderLibTable(),50);
+  }
+  if(id==='classroom') setTimeout(()=>renderRooms(),50);
+  if(id==='faculty') setTimeout(()=>renderFaculty(),50);
+  if(id==='lab') setTimeout(()=>renderLabReservations(),50);
 }
 
-// ─── CRUD ───
+// ─── CRUD (classrooms / faculty / lab — all backend-backed) ───
 function v(...ids){return ids.map(id=>document.getElementById(id).value.trim())}
 function clr(...ids){ids.forEach(id=>{document.getElementById(id).value=''})}
 function addLib(){
   // Library reservations are now done via the Smart Search popup above
   showToast('💡 Use Smart Search above to find & reserve books','warn');
 }
-function delRow(bid,idx){
-  const m={libBody:'library',labBody:'lab',facBody:'faculty',roomBody:'rooms',apptBody:'appts'};
-  db[m[bid]].splice(idx,1);renderAll();showToast('Entry removed.');updateAct();
+
+// ── Classrooms ──
+async function addRoom(){
+  const [roomNo,location]=v('roomNo','roomLoc');
+  const capacity=document.getElementById('roomCap').value;
+  if(!roomNo){showToast('⚠️ Enter a room number','warn');return}
+  try{
+    await apiFetch('/api/classrooms',{method:'POST',body:JSON.stringify({roomNo,location,capacity})});
+    clr('roomNo','roomLoc');document.getElementById('roomCap').value='';
+    showToast('✅ Room added');
+    renderRooms();
+  }catch(err){showToast('❌ '+err.message,'warn')}
 }
+async function deleteRoom(id){
+  try{ await apiFetch('/api/classrooms/'+id,{method:'DELETE'}); showToast('Room removed.'); renderRooms(); }
+  catch(err){ showToast('❌ '+err.message,'warn'); }
+}
+async function renderRooms(){
+  const tb=document.getElementById('roomBody');const cnt=document.getElementById('roomCnt');
+  try{
+    const {classrooms}=await apiFetch('/api/classrooms');
+    if(cnt)cnt.textContent=classrooms.length;
+    if(!classrooms.length){tb.innerHTML='<tr><td class="empty" colspan="5">No rooms.</td></tr>';return}
+    tb.innerHTML=classrooms.map(r=>`<tr>
+      <td>${r.room_no}</td><td>${r.location||'—'}</td><td>${r.capacity||'—'}</td>
+      <td><span class="chip av">Free</span></td>
+      <td><button class="del-btn" onclick="deleteRoom(${r.id})">Remove</button></td>
+    </tr>`).join('');
+  }catch(err){ tb.innerHTML='<tr><td class="empty" colspan="5">Could not load rooms.</td></tr>'; }
+}
+
+// ── Faculty ──
+async function addFac(){
+  const [name,department,slot]=v('facName','facDept','facSlot');
+  if(!name){showToast('⚠️ Enter a faculty name','warn');return}
+  try{
+    await apiFetch('/api/faculty',{method:'POST',body:JSON.stringify({name,department,slot})});
+    clr('facName','facDept','facSlot');
+    showToast('✅ Faculty slot added');
+    renderFaculty();
+  }catch(err){showToast('❌ '+err.message,'warn')}
+}
+async function deleteFaculty(id){
+  try{ await apiFetch('/api/faculty/'+id,{method:'DELETE'}); showToast('Entry removed.'); renderFaculty(); }
+  catch(err){ showToast('❌ '+err.message,'warn'); }
+}
+async function renderFaculty(){
+  const tb=document.getElementById('facBody');const cnt=document.getElementById('facCnt');
+  try{
+    const {faculty}=await apiFetch('/api/faculty');
+    if(cnt)cnt.textContent=faculty.length;
+    if(!faculty.length){tb.innerHTML='<tr><td class="empty" colspan="5">No faculty.</td></tr>';return}
+    tb.innerHTML=faculty.map(f=>`<tr>
+      <td>${f.name}</td><td>${f.department||'—'}</td><td>${f.slot||'—'}</td>
+      <td><span class="chip av">Available</span></td>
+      <td><button class="del-btn" onclick="deleteFaculty(${f.id})">Remove</button></td>
+    </tr>`).join('');
+  }catch(err){ tb.innerHTML='<tr><td class="empty" colspan="5">Could not load faculty.</td></tr>'; }
+}
+
+// ── Lab equipment + reservations ──
+const deptLabelMap={btech:'B.Tech',agriculture:'Agriculture',bpharma:'B Pharma'};
+async function showDept(dept,btn){
+  document.querySelectorAll('.dept-btn').forEach(b=>b.classList.remove('on'));btn.classList.add('on');
+  const grid=document.getElementById('equipGrid');
+  try{
+    const {equipment}=await apiFetch('/api/lab/equipment?department='+encodeURIComponent(deptLabelMap[dept]||dept));
+    grid.innerHTML=equipment.map(e=>`<div class="eq-item"><span class="eq-ico">${e.icon||'🔧'}</span>${e.name}</div>`).join('');
+  }catch(err){ grid.innerHTML=''; }
+}
+async function addLab(){
+  const [equipment,slot]=v('labEquip','labSlot');
+  if(!equipment||!slot){showToast('⚠️ Enter equipment name and time slot','warn');return}
+  try{
+    await apiFetch('/api/lab/reservations',{method:'POST',body:JSON.stringify({equipment,slot})});
+    clr('labEquip','labSlot');
+    showToast('✅ Equipment reserved');
+    renderLabReservations();
+  }catch(err){showToast('❌ '+err.message,'warn')}
+}
+async function deleteLabReservation(id){
+  try{ await apiFetch('/api/lab/reservations/'+id,{method:'DELETE'}); showToast('Reservation cancelled.'); renderLabReservations(); }
+  catch(err){ showToast('❌ '+err.message,'warn'); }
+}
+async function renderLabReservations(){
+  const tb=document.getElementById('labBody');const cnt=document.getElementById('labCnt');
+  try{
+    const {reservations}=await apiFetch('/api/lab/reservations');
+    if(cnt)cnt.textContent=reservations.length;
+    if(!reservations.length){tb.innerHTML='<tr><td class="empty" colspan="4">No reservations.</td></tr>';return}
+    tb.innerHTML=reservations.map(r=>`<tr>
+      <td>${r.equipment}</td><td>${r.slot}</td>
+      <td><span class="chip av">Reserved</span></td>
+      <td><button class="del-btn" onclick="deleteLabReservation(${r.id})">Cancel</button></td>
+    </tr>`).join('');
+  }catch(err){ tb.innerHTML='<tr><td class="empty" colspan="4">Could not load reservations.</td></tr>'; }
+}
+
+// ── Combined refresh + recent activity ──
 function renderAll(){
-  renderTable('libBody',db.library,'No bookings yet.','libCnt',5);
-  renderTable('labBody',db.lab,'No reservations.','labCnt',4);
-  renderTable('facBody',db.faculty,'No faculty.','facCnt',5);
-  renderTable('roomBody',db.rooms,'No rooms.','roomCnt',5);
-  renderTable('apptBody',db.appts,'No appointments.','apptCnt',5);
+  renderRooms();
+  renderFaculty();
+  renderLabReservations();
+  if(typeof renderLibTable==='function') renderLibTable();
+  if(typeof renderApptTable==='function') renderApptTable();
   updateAct();
 }
 function updateAct(){
+  // Recent activity is built from whatever the library/hospital render
+  // functions most recently fetched (they cache their last result on window).
   const all=[];
-  db.library.forEach(r=>all.push({t:'📚 '+r[0],s:'Library booking',d:'b'}));
-  db.lab.forEach(r=>all.push({t:'🔬 '+r[0],s:'Lab reservation',d:'g'}));
-  db.appts.forEach(r=>all.push({t:'🏥 Dr. '+r[1],s:'Hospital appt · '+r[2],d:'y'}));
+  (window._lastLibReservations||[]).forEach(r=>all.push({t:'📚 '+r.title,s:'Library reservation',d:'b'}));
+  (window._lastLabReservations||[]).forEach(r=>all.push({t:'🔬 '+r.equipment,s:'Lab reservation',d:'g'}));
+  (window._lastAppointments||[]).forEach(r=>all.push({t:'🏥 Dr. '+r.name,s:'Hospital appt · '+r.spec,d:'y'}));
   const rb=document.getElementById('recentAct');
+  if(!rb)return;
   if(!all.length){rb.innerHTML='<div class="act-item"><div class="act-dot g"></div><div class="act-info"><div class="act-t">No activity yet</div><div class="act-s">Use any module to get started</div></div></div>';return}
   rb.innerHTML=all.slice(-4).reverse().map(a=>'<div class="act-item"><div class="act-dot '+a.d+'"></div><div class="act-info"><div class="act-t">'+a.t+'</div><div class="act-s">'+a.s+'</div></div></div>').join('');
 }
-function showDept(dept,btn){
-  document.querySelectorAll('.dept-btn').forEach(b=>b.classList.remove('on'));btn.classList.add('on');
-  document.getElementById('equipGrid').innerHTML=labData[dept].map(e=>'<div class="eq-item"><span class="eq-ico">'+e.i+'</span>'+e.n+'</div>').join('');
-}
 function loadStatic(){
-  // Render book catalogue using new BOOKS JSON (clickable cards)
   if(typeof renderCatalogue==='function') renderCatalogue();
-  else document.getElementById('catalogGrid').innerHTML=catalogue.map(b=>'<div class="eq-item"><span class="eq-ico">📖</span>'+b+'</div>').join('');
   showDept('btech',document.querySelector('.dept-btn'));
-  // Render doctor cards using new DOCTORS JSON
   if(typeof renderDocCards==='function') renderDocCards('all');
-  else document.getElementById('doctorGrid').innerHTML=doctors.map(d=>'<div class="info-c"><div class="ic-row"><span class="ic-name">'+d.i+' '+d.n+'</span><span class="chip av">Available</span></div><div class="ic-sub">'+d.s+' · '+d.t+'</div></div>').join('');
 }
 
 // ─── SEARCH ───
