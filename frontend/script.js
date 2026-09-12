@@ -1,4 +1,3 @@
-
 /* ══════════════════════════════════════════════════════════
    All book / doctor / food / reservation data now comes from
    the backend (see API_BASE in index.html). apiFetch(), getToken(),
@@ -391,6 +390,121 @@ async function renderCatalogue() {
       </div>
     </div>`
   ).join('');
+}
+
+/* ══════════════════════════════════════════════════════════
+   AI TUTOR
+══════════════════════════════════════════════════════════ */
+let currentQuiz = [];
+let quizAnswers = {};
+
+async function analyzePdf() {
+  const fileInput = document.getElementById('aiPdfInput');
+  const file = fileInput.files[0];
+  const status = document.getElementById('aiStatus');
+  const btn = document.getElementById('aiAnalyzeBtn');
+  if (!file) { showToast('⚠️ Choose a PDF first', 'warn'); return; }
+  if (file.type !== 'application/pdf') { showToast('⚠️ Please select a PDF file', 'warn'); return; }
+
+  btn.disabled = true;
+  status.textContent = '🧠 Reading and analyzing your PDF — this can take 15-30 seconds…';
+
+  const formData = new FormData();
+  formData.append('pdf', file);
+
+  try {
+    const token = getToken();
+    const res = await fetch(API_BASE + '/api/ai-tutor/analyze', {
+      method: 'POST',
+      headers: token ? { Authorization: 'Bearer ' + token } : {},
+      body: formData
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Analysis failed');
+
+    renderAiResults(data);
+    status.textContent = '✅ Done! Scroll down for your summary, key points and quiz.';
+    loadAiHistory();
+  } catch (err) {
+    status.textContent = '';
+    showToast('❌ ' + err.message, 'warn');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function renderAiResults(data) {
+  document.getElementById('aiResults').style.display = 'block';
+  document.getElementById('aiSummaryText').textContent = data.summary;
+  document.getElementById('aiKeyPoints').innerHTML = data.keyPoints.map(k => `<li>${k}</li>`).join('');
+  currentQuiz = data.quiz;
+  quizAnswers = {};
+  renderQuiz();
+}
+
+function renderQuiz() {
+  const body = document.getElementById('aiQuizBody');
+  document.getElementById('aiQuizScore').textContent = Object.keys(quizAnswers).length + ' / ' + currentQuiz.length + ' answered';
+  body.innerHTML = currentQuiz.map((q, qi) => {
+    const answered = quizAnswers[qi];
+    const optsHtml = q.options.map((opt, oi) => {
+      let cls = 'quiz-opt';
+      if (answered !== undefined) {
+        if (oi === q.correctIndex) cls += ' correct';
+        else if (oi === answered && oi !== q.correctIndex) cls += ' wrong';
+      }
+      return `<div class="${cls}" onclick="answerQuiz(${qi},${oi})">${String.fromCharCode(65+oi)}. ${opt}</div>`;
+    }).join('');
+    const explanation = answered !== undefined
+      ? `<div class="quiz-explain">${answered === q.correctIndex ? '✅ Correct — ' : '❌ Not quite — '}${q.explanation}</div>`
+      : '';
+    return `<div class="quiz-card">
+      <div class="quiz-q">${qi+1}. ${q.question}</div>
+      <div class="quiz-opts">${optsHtml}</div>
+      ${explanation}
+    </div>`;
+  }).join('');
+}
+function answerQuiz(qi, oi) {
+  if (quizAnswers[qi] !== undefined) return; // lock after first answer
+  quizAnswers[qi] = oi;
+  renderQuiz();
+}
+
+async function loadAiHistory() {
+  const list = document.getElementById('aiHistoryList');
+  if (!list) return;
+  try {
+    const data = await apiFetch('/api/ai-tutor/sessions');
+    if (!data.sessions.length) { list.innerHTML = '<div class="empty" style="padding:16px 0">No PDFs analyzed yet.</div>'; return; }
+    list.innerHTML = data.sessions.map(s => `
+      <div class="act-item" style="cursor:pointer" onclick="loadAiSession(${s.id})">
+        <div class="act-dot b"></div>
+        <div class="act-info"><div class="act-t">${s.filename}</div><div class="act-s">${new Date(s.created_at).toLocaleString('en-IN')}</div></div>
+        <button class="del-btn" onclick="event.stopPropagation();deleteAiSession(${s.id})">Delete</button>
+      </div>`).join('');
+  } catch (err) {
+    list.innerHTML = '<div class="empty" style="padding:16px 0">Sign in to see your history.</div>';
+  }
+}
+async function loadAiSession(id) {
+  try {
+    const data = await apiFetch('/api/ai-tutor/sessions/' + id);
+    renderAiResults(data);
+    document.getElementById('aiStatus').textContent = '📂 Loaded from your history.';
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  } catch (err) {
+    showToast('❌ ' + err.message, 'warn');
+  }
+}
+async function deleteAiSession(id) {
+  try {
+    await apiFetch('/api/ai-tutor/sessions/' + id, { method: 'DELETE' });
+    showToast('Session deleted.');
+    loadAiHistory();
+  } catch (err) {
+    showToast('❌ ' + err.message, 'warn');
+  }
 }
 
 /* ── TOAST helper ── */
