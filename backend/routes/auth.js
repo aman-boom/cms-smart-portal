@@ -5,9 +5,8 @@ const { requireAuth, JWT_SECRET } = require('../middleware/auth');
 
 const router = express.Router();
 
-function generateOTP() {
-  return String(Math.floor(1000 + Math.random() * 9000)); // 4-digit, matches frontend's maxlength=4
-}
+// Set these on Render → Environment tab
+const MSG91_AUTHKEY = process.env.MSG91_AUTHKEY;
 
 /* ── REGISTER ──
    body: { loginId, name, phone, role: 'student'|'teacher', department, designation? } */
@@ -30,51 +29,69 @@ router.post('/register', (req, res) => {
   res.status(201).json({ user });
 });
 
-/* ── SEND OTP ──
-   body: { loginId, phone }
-   In production this would call an SMS gateway. For dev, the OTP is returned
-   directly in the response so the frontend can display/autofill it. */
-router.post('/otp/send', (req, res) => {
-  const { loginId, phone } = req.body || {};
-  if (!loginId || !phone) return res.status(400).json({ error: 'loginId and phone are required' });
+/* ── VERIFY OTP-WIDGET TOKEN ──
+   body: { loginId, "access-token": "<jwt from the OTP widget's success callback>" }
+
+   Flow now:
+   1. Frontend opens the MSG91 OTP widget (Send OTP + Verify OTP both happen
+      inside the widget itself — no /otp/send or /otp/verify needed anymore).
+   2. Widget's `success(data)` callback fires with a short-lived access-token.
+   3. Frontend POSTs { loginId, "access-token": data.token } here.
+   4. This route re-verifies that token directly with MSG91's server
+      (never trusts the client-side callback alone), confirms it matches
+      the phone number on file for loginId, then issues your app's own JWT. */
+router.post('/otp/verify', async (req, res) => {
+  const { loginId, 'access-token': widgetToken } = req.body || {};
+  if (!loginId || !widgetToken) {
+    return res.status(400).json({ error: 'loginId and access-token are required' });
+  }
+  if (!MSG91_AUTHKEY) {
+    return res.status(500).json({ error: 'MSG91_AUTHKEY is not configured on the server' });
+  }
 
   const user = db.prepare('SELECT * FROM users WHERE login_id = ?').get(loginId);
   if (!user) return res.status(404).json({ error: 'No account found for this ID. Please register first.' });
-  if (user.phone !== phone) return res.status(400).json({ error: 'Phone number does not match our records' });
 
-  const otp = generateOTP();
-  const expiresAt = Date.now() + 5 * 60 * 1000; // 5 minutes
-  db.prepare('INSERT INTO otp_requests (login_id, otp, expires_at) VALUES (?,?,?)').run(loginId, otp, expiresAt);
+  try {
+    const msgRes = await fetch('https://control.msg91.com/api/v5/widget/verifyAccessToken', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({
+        authkey: MSG91_AUTHKEY,
+        'access-token': widgetToken,
+      }),
+    });
+    const data = await msgRes.json();
 
-  // TODO: integrate a real SMS provider here instead of returning the OTP.
-  res.json({ message: 'OTP sent', devOtp: otp, expiresInSeconds: 300 });
-});
+    if (data.type !== 'success') {
+      return res.status(400).json({ error: data.message || 'Invalid or expired OTP token' });
+    }
 
-/* ── VERIFY OTP ──
-   body: { loginId, otp } -> returns a JWT + user profile */
-router.post('/otp/verify', (req, res) => {
-  const { loginId, otp } = req.body || {};
-  if (!loginId || !otp) return res.status(400).json({ error: 'loginId and otp are required' });
+    // data.message holds the verified identifier (mobile number, usually with
+    // country code, e.g. "91XXXXXXXXXX"). Compare against the stored phone,
+    // stripping non-digits and allowing the country-code prefix either way.
+    const verifiedDigits = String(data.message).replace(/\D/g, '');
+    const storedDigits = String(user.phone).replace(/\D/g, '');
+    const matches =
+      verifiedDigits === storedDigits ||
+      verifiedDigits.endsWith(storedDigits) ||
+      storedDigits.endsWith(verifiedDigits);
 
-  const record = db.prepare(
-    `SELECT * FROM otp_requests WHERE login_id = ? AND otp = ? AND consumed = 0 ORDER BY id DESC LIMIT 1`
-  ).get(loginId, otp);
+    if (!matches) {
+      return res.status(400).json({ error: 'Verified number does not match the phone on this account' });
+    }
 
-  if (!record) return res.status(400).json({ error: 'Invalid OTP' });
-  if (record.expires_at < Date.now()) return res.status(400).json({ error: 'OTP has expired' });
+    const token = jwt.sign(
+      { sub: user.id, loginId: user.login_id, role: user.role, name: user.name },
+      JWT_SECRET,
+      { expiresIn: '12h' }
+    );
 
-  db.prepare('UPDATE otp_requests SET consumed = 1 WHERE id = ?').run(record.id);
-
-  const user = db.prepare('SELECT * FROM users WHERE login_id = ?').get(loginId);
-  if (!user) return res.status(404).json({ error: 'User not found' });
-
-  const token = jwt.sign(
-    { sub: user.id, loginId: user.login_id, role: user.role, name: user.name },
-    JWT_SECRET,
-    { expiresIn: '12h' }
-  );
-
-  res.json({ token, user });
+    res.json({ token, user });
+  } catch (err) {
+    console.error('MSG91 verifyAccessToken error:', err);
+    res.status(502).json({ error: 'Could not verify OTP with MSG91 right now' });
+  }
 });
 
 /* ── CURRENT USER ── */
